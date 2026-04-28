@@ -945,7 +945,7 @@ loader:SetScript("OnEvent", function(self, event, addon)
         local ldbObj = LDB:NewDataObject("RollSheet", {
             type  = "launcher",
             text  = "RollSheet",
-            icon  = "Interface/Icons/INV_Scroll_03",
+            icon  = "Interface/Icons/INV_Misc_Dice_02",
             OnClick = function(_, button)
                 if button == "RightButton" then
                     -- Right-click: toggle character sheet directly
