@@ -1,0 +1,14 @@
+## Interface: 120001
+## Title: RollSheet
+## Notes: RP dice roller and character sheet — WoW: Midnight
+## Author: You
+## Version: 1.3
+## SavedVariablesPerCharacter: RollSheetDB
+## OptionalDeps: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0
+
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
+
+RollSheet.lua
