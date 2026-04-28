@@ -1,4 +1,4 @@
--- RollSheet.lua  v1.3
+-- RollSheet.lua  v1.3.1
 -- RP dice roller + character sheet  ·  World of Warcraft: Midnight
 -- /rs  or  /rollsheet
 --
