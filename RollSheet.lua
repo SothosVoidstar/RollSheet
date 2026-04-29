@@ -1,4 +1,4 @@
--- RollSheet.lua  v1.3.1
+-- RollSheet.lua  v1.3.2
 -- RP dice roller + character sheet  ·  World of Warcraft: Midnight
 -- /rs  or  /rollsheet
 --
@@ -106,6 +106,21 @@ end
 
 local function San(s)
     return (s or ""):gsub("[|:]", "_")
+end
+
+-- Safely extract the short name (no realm suffix) from a unit name.
+-- Returns nil if the input is missing, UNKNOWN, or a "secret string"
+-- (introduced in WoW Midnight 12.0 for cross-realm contexts like
+-- Timewalking, where addons are forbidden from inspecting names).
+-- Wrapping in pcall lets us silently skip these units instead of
+-- erroring — we couldn't have identified them anyway.
+local function SafeShortName(name)
+    if not name or name == UNKNOWN then return nil end
+    local ok, short = pcall(function()
+        return name:match("^([^%-]+)") or name
+    end)
+    if ok and type(short) == "string" then return short end
+    return nil
 end
 
 local function Serialize()
@@ -392,7 +407,8 @@ local msgFrame = CreateFrame("Frame")
 msgFrame:RegisterEvent("CHAT_MSG_ADDON")
 msgFrame:SetScript("OnEvent", function(self, event, prefix, text, channel, sender)
     if prefix ~= ADDON_PREFIX then return end
-    local short = sender:match("^([^%-]+)") or sender
+    local short = SafeShortName(sender)
+    if not short then return end
     if short == UnitName("player") then return end   -- ignore our own yells
 
     -- ── Targeted request: REQ:TargetName|Mode ───────────────────
@@ -948,11 +964,16 @@ loader:SetScript("OnEvent", function(self, event, addon)
             icon  = "Interface/Icons/INV_Misc_Dice_02",
             OnClick = function(_, button)
                 if button == "RightButton" then
-                    -- Right-click: toggle character sheet directly
+                    -- Right-click: open toolbar AND character sheet together;
+                    -- if the sheet is already shown, close both.
+                    if not mainFrame then return end
                     if not sheetFrame then pcall(BuildSheet) end
-                    if sheetFrame then
-                        if sheetFrame:IsShown() then sheetFrame:Hide()
-                        else sheetFrame:Show() end
+                    if sheetFrame and sheetFrame:IsShown() then
+                        sheetFrame:Hide()
+                        mainFrame:Hide()
+                    else
+                        mainFrame:Show()
+                        if sheetFrame then sheetFrame:Show() end
                     end
                 else
                     -- Left-click: toggle the toolbar
@@ -968,7 +989,7 @@ loader:SetScript("OnEvent", function(self, event, addon)
             OnTooltipShow = function(tt)
                 tt:AddLine("RollSheet")
                 tt:AddLine("|cffaaaaaaLeft-click:|r toggle toolbar", 1, 1, 1)
-                tt:AddLine("|cffaaaaaaRight-click:|r toggle character sheet", 1, 1, 1)
+                tt:AddLine("|cffaaaaaaRight-click:|r toggle toolbar + sheet", 1, 1, 1)
                 tt:AddLine("|cffaaaaaaShift+drag:|r move button", 1, 1, 1)
             end,
         })
@@ -1130,9 +1151,8 @@ loader:SetScript("OnEvent", function(self, event, addon)
                 end)
             end
             if not unit or not UnitIsPlayer(unit) then return end
-            local name = UnitName(unit)
-            if not name or name == UNKNOWN then return end
-            name = name:match("^([^%-]+)") or name
+            local name = SafeShortName(UnitName(unit))
+            if not name then return end
 
             EnsureData(name)
             local data = GetDataForName(name)
@@ -1246,9 +1266,8 @@ loader:SetScript("OnEvent", function(self, event, addon)
             if not UnitExists("mouseover") or not UnitIsPlayer("mouseover") then
                 return
             end
-            local name = UnitName("mouseover")
+            local name = SafeShortName(UnitName("mouseover"))
             if not name then return end
-            name = name:match("^([^%-]+)") or name
             EnsureData(name)
         end)
 

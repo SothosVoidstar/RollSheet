@@ -1,5 +1,11 @@
 # RollSheet Changelog
 
+## v1.3.2
+
+- Fixed minimap button right-click. It now reliably toggles both the toolbar and the character sheet together.
+- Fixed a Lua error that could occur in cross-realm contexts like Timewalking dungeons. Player names returned as protected strings are now skipped gracefully instead of erroring.
+- Updated interface compatibility to WoW 12.0.5.
+
 ## v1.3.1
 
 - Switched to a manual changelog for cleaner, controlled release notes.
