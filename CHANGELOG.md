@@ -2,6 +2,8 @@
 
 ## v1.3.2
 
+- **Fixed broken networking.** v1.3 attempted to use the YELL channel for addon messages, which is not supported on retail WoW — all stat sync was silently failing. Communication now uses WHISPER for direct requests and PARTY / RAID / INSTANCE_CHAT for passive broadcasts.
+- **Cross-faction note.** Cross-faction sync now works through cross-faction groups, which are the standard for organized RP events in modern WoW. Form a group with your cross-faction friends and sheets will exchange automatically.
 - Fixed minimap button right-click. It now reliably toggles both the toolbar and the character sheet together.
 - Fixed a Lua error that could occur in cross-realm contexts like Timewalking dungeons. Player names returned as protected strings are now skipped gracefully instead of erroring.
 - Updated interface compatibility to WoW 12.0.5.

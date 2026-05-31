@@ -375,24 +375,59 @@ local sheetCache = {}
 local pendingReq = {}    -- tracks /rs view requests (opens viewer on RSP)
 
 -- ================================================================
---  Send a broadcast or request via YELL (silent, cross-faction).
---  Falls back gracefully if YELL is unavailable (e.g. instances).
+--  Networking
 -- ================================================================
-local function SendYell(payload)
-    -- C_ChatInfo.SendAddonMessage returns false if the channel
-    -- can't carry the message (e.g. restricted zones). We swallow
-    -- the failure rather than spamming the user.
-    pcall(C_ChatInfo.SendAddonMessage, ADDON_PREFIX, payload, "YELL")
+-- Two channels are used:
+--   • GROUP    (PARTY / RAID / INSTANCE_CHAT)
+--       Used for passive broadcasts (SHR) so everyone in a group
+--       receives stat updates automatically.  Works cross-faction
+--       inside cross-faction parties/raids, which is how modern
+--       WoW handles Alliance + Horde groups for events.
+--   • WHISPER
+--       Used for targeted requests (REQ) and replies (RSP / SHR)
+--       when we need to reach a specific player.  Works within
+--       faction always; cross-faction only via Battle.net friends.
+--
+-- YELL was tried in v1.3 to allow proximity broadcasts to non-group
+-- strangers, but it is not a supported addon-message channel in
+-- retail WoW (Classic only).  All sends silently failed, which is
+-- the bug that v1.3.2 fixes.
+
+local function GetGroupChannel()
+    if IsInGroup(LE_PARTY_CATEGORY_INSTANCE) then
+        return "INSTANCE_CHAT"
+    elseif IsInRaid() then
+        return "RAID"
+    elseif IsInGroup() then
+        return "PARTY"
+    end
+    return nil
 end
 
--- Broadcast our sheet to everyone in YELL range (~300 yards).
+-- Send a payload to the player's current group channel.
+-- Returns true if a channel was available and the send was attempted,
+-- false if we're not in any group (caller can fall back or skip).
+local function SendToGroup(payload)
+    local ch = GetGroupChannel()
+    if not ch then return false end
+    pcall(C_ChatInfo.SendAddonMessage, ADDON_PREFIX, payload, ch)
+    return true
+end
+
+-- Send a payload directly to one player via WHISPER.
+local function SendToPlayer(target, payload)
+    if not target or target == UnitName("player") then return end
+    pcall(C_ChatInfo.SendAddonMessage, ADDON_PREFIX, payload, "WHISPER", target)
+end
+
+-- Broadcast our sheet to everyone in our group (silent no-op when solo).
 local function BroadcastSheet()
     local ok, payload = pcall(Serialize)
-    if ok then SendYell("SHR|" .. payload) end
+    if ok then SendToGroup("SHR|" .. payload) end
 end
 
 -- Debounced broadcaster: multiple calls within 1.5s collapse to one
--- send. Used for stat-change updates AND for reciprocation, so a
+-- send.  Used for stat-change updates AND for reciprocation, so a
 -- crowd of incoming SHRs only triggers a single outgoing broadcast.
 local broadcastTimer = nil
 local function ScheduleBroadcast()
@@ -409,22 +444,20 @@ msgFrame:SetScript("OnEvent", function(self, event, prefix, text, channel, sende
     if prefix ~= ADDON_PREFIX then return end
     local short = SafeShortName(sender)
     if not short then return end
-    if short == UnitName("player") then return end   -- ignore our own yells
+    if short == UnitName("player") then return end   -- ignore our own group echoes
 
-    -- ── Targeted request: REQ:TargetName|Mode ───────────────────
-    -- Mode "V" = explicit /rs view (responder sends RSP, opens viewer
-    -- on the requester's side). Mode "H" or anything else = passive
-    -- ping (responder sends SHR, just caches).
-    if text:sub(1, 4) == "REQ:" then
-        local target, mode = text:match("^REQ:([^|]+)|?(.?)")
-        if target == UnitName("player") then
-            local ok, payload = pcall(Serialize)
-            if ok then
-                if mode == "V" then
-                    SendYell("RSP|" .. payload)
-                else
-                    SendYell("SHR|" .. payload)
-                end
+    -- ── REQ|Mode ── targeted request via WHISPER ────────────────
+    -- Mode "V" = explicit /rs view (respond with RSP, opens viewer
+    -- on requester's side).  Mode "H" or anything else = passive
+    -- hover ping (respond with SHR, just caches).
+    if text:sub(1, 3) == "REQ" then
+        local mode = text:match("|(.)$") or "H"
+        local ok, payload = pcall(Serialize)
+        if ok then
+            if mode == "V" then
+                SendToPlayer(sender, "RSP|" .. payload)
+            else
+                SendToPlayer(sender, "SHR|" .. payload)
             end
         end
 
@@ -436,22 +469,24 @@ msgFrame:SetScript("OnEvent", function(self, event, prefix, text, channel, sende
             pendingReq[short] = nil
             ShowRemoteSheet(short, sheet)
         end
-        -- Reciprocate (debounced) so the sender gets our sheet too.
-        if isNew then ScheduleBroadcast() end
+        -- If they don't have us cached yet, push our sheet back too.
+        if isNew then SendToPlayer(sender, "SHR|" .. (select(2, pcall(Serialize)) or "")) end
 
     elseif text:sub(1, 3) == "SHR" then
         local isNew = sheetCache[short] == nil
         local sheet = Deserialize(text:sub(5))
         sheetCache[short] = sheet
-        -- Reciprocate (debounced) when first hearing from someone.
-        -- Closes the cache gap where we zoned in after them.
-        if isNew then ScheduleBroadcast() end
+        -- If this came in via WHISPER and we don't have them cached,
+        -- reciprocate directly.  Group-channel SHRs are already mutual.
+        if isNew and channel == "WHISPER" then
+            SendToPlayer(sender, "SHR|" .. (select(2, pcall(Serialize)) or ""))
+        end
     end
 end)
 
 local function RequestSheet(playerName)
     pendingReq[playerName] = true
-    SendYell("REQ:" .. playerName .. "|V")
+    SendToPlayer(playerName, "REQ|V")
     print("|cffaa8844RollSheet|r Requested " .. playerName .. "'s sheet...")
     -- Auto-clear pending flag after 10s if no response
     C_Timer.After(10, function()
@@ -464,11 +499,14 @@ end
 
 local function ShareSheet()
     local ok, payload = pcall(Serialize)
-    if ok then
-        SendYell("SHR|" .. payload)
-        print("|cffaa8844RollSheet|r Sheet broadcast to nearby players.")
-    else
+    if not ok then
         print("|cffaa8844RollSheet|r Share failed: " .. tostring(payload))
+        return
+    end
+    if SendToGroup("SHR|" .. payload) then
+        print("|cffaa8844RollSheet|r Sheet shared with party / raid.")
+    else
+        print("|cffaa8844RollSheet|r Not in a group — use /rs view <name> to request a specific player.")
     end
 end
 
@@ -999,11 +1037,12 @@ loader:SetScript("OnEvent", function(self, event, addon)
         end
     end)
 
-    -- ── AUTO-BROADCAST ON ZONE / WORLD CHANGES ───────────────────
-    -- YELL is range-limited (~300 yards), so we re-announce
-    -- ourselves whenever the player enters a new zone or world.
-    -- This populates everyone's caches passively, eliminating the
-    -- need for per-hover requests in almost all cases.
+    -- ── AUTO-BROADCAST ON GROUP / WORLD CHANGES ──────────────────
+    -- Whenever we change zone, log in, or join a new group, we
+    -- announce ourselves so everyone in the group has fresh data
+    -- in their cache without anyone needing to manually request.
+    -- BroadcastSheet is a no-op when we're solo, so PLAYER_ENTERING_WORLD
+    -- and ZONE_CHANGED_NEW_AREA cost nothing outside groups.
     local autoSharePending = false
     local function QueueAutoBroadcast(delay)
         if autoSharePending then return end
@@ -1017,6 +1056,7 @@ loader:SetScript("OnEvent", function(self, event, addon)
     local zoneListener = CreateFrame("Frame")
     zoneListener:RegisterEvent("PLAYER_ENTERING_WORLD")
     zoneListener:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+    zoneListener:RegisterEvent("GROUP_ROSTER_UPDATE")
     zoneListener:SetScript("OnEvent", function() QueueAutoBroadcast(5) end)
 
     -- ── TOOLTIP INTEGRATION ──────────────────────────────────────
@@ -1138,7 +1178,7 @@ loader:SetScript("OnEvent", function(self, event, addon)
             if name == UnitName("player") then return end
             if sheetCache[name] or hoverPings[name] then return end
             hoverPings[name] = true
-            SendYell("REQ:" .. name .. "|H")
+            SendToPlayer(name, "REQ|H")
             C_Timer.After(5, function() hoverPings[name] = nil end)
         end
 
