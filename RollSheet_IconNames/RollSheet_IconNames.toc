@@ -1,0 +1,10 @@
+## Interface: 120100
+## Title: RollSheet Icon Names
+## Notes: Icon names for RollSheet's icon search. Loads only when you search.
+## Author: SothosVoidstar
+## Version: 1.8.0
+## X-Credits: Icon names from the wowdev community listfile (github.com/wowdev/wow-listfile)
+## LoadOnDemand: 1
+## Dependencies: RollSheet
+
+IconNames.lua

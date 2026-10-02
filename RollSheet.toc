@@ -1,9 +1,10 @@
-## Interface: 120005
+## Interface: 120100
 ## Title: RollSheet
 ## Notes: RP dice roller and character sheet — WoW: Midnight
-## Author: You
-## Version: 1.3.2
+## Author: SothosVoidstar
+## Version: 1.8.0
 ## SavedVariablesPerCharacter: RollSheetDB
+## X-Credits: Icon names from the wowdev community listfile (github.com/wowdev/wow-listfile)
 ## OptionalDeps: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0
 
 Libs\LibStub\LibStub.lua
