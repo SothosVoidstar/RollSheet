@@ -1,5 +1,10 @@
 # RollSheet Changelog
 
+## v1.8.1
+
+- **Choose what your tooltip shows.** In the gear menu, *My tooltip shows* lets each character pick which fields appear when other players hover them: Health, Armour & AC, and each resource individually. Hide everything and the RollSheet section disappears from your tooltip entirely. Your full sheet is still available through `/rs view`.
+- Players still on 1.8.0 keep seeing every field until they update, but sheets sync between both versions as normal.
+
 ## v1.8.0
 
 **⚠ Breaking change:** v1.8 uses a new communication channel and can't exchange sheets with older versions. Everyone you play with needs to update.

@@ -1,4 +1,4 @@
--- RollSheet.lua  v1.8.0
+-- RollSheet.lua  v1.8.1
 -- RP dice roller + character sheet  ·  World of Warcraft: Midnight
 -- /rs  or  /rollsheet
 --
@@ -19,7 +19,7 @@ local addonName, ns = ...
 --  Constants
 -- ================================================================
 
-local ADDON_VERSION = "1.8.0"
+local ADDON_VERSION = "1.8.1"
 local ADDON_PREFIX = "RSHEET2"   -- new prefix: v1.4 is not wire-compatible with 1.3.x
 
 local RES_TYPES = {
@@ -114,6 +114,10 @@ local function InitDB()
             db.attacks[2] and db.attacks[2].id or nil,
         }
     end
+    -- 1.8.1: which fields this character shows in their tooltip
+    if type(db.tooltip) ~= "table" then db.tooltip = {} end
+    if db.tooltip.hp == nil then db.tooltip.hp = true end
+    if db.tooltip.ac == nil then db.tooltip.ac = true end
     if type(db.parchment) ~= "string" or db.parchment == "quest" then db.parchment = "rollsheet" end   -- quest scroll removed in 1.7.3
     if db.rollStyle ~= "rewrite" and db.rollStyle ~= "echo" and db.rollStyle ~= "off" then
         db.rollStyle = "rewrite"
@@ -205,16 +209,22 @@ local function Serialize()
     t[#t+1] = "H:" .. db.hp.current .. ":" .. db.hp.max
     local at = ARM_ORDER[db.armour.typeIdx] or "Light"
     t[#t+1] = "A:" .. db.armour.ac .. ":" .. San(at)
+    -- Tooltip choices: "T:<show HP>:<show AC>".  Hidden resources get a
+    -- trailing ":1".  Clients older than 1.8.1 ignore both and simply
+    -- show everything.
+    local tt = db.tooltip or {}
+    t[#t+1] = "T:" .. (tt.hp == false and 0 or 1) .. ":" .. (tt.ac == false and 0 or 1)
     for _, r in ipairs(db.resources) do
+        local hid = r.hideTip and ":1" or ""
         if r.rtype == "Custom" then
             local rc = r.color or {0.75, 0.75, 0.75}
             local hex = string.format("%02x%02x%02x",
                 math.floor(rc[1]*255+0.5),
                 math.floor(rc[2]*255+0.5),
                 math.floor(rc[3]*255+0.5))
-            t[#t+1] = "X:" .. San(r.custom) .. ":" .. r.current .. ":" .. r.max .. ":" .. hex
+            t[#t+1] = "X:" .. San(r.custom) .. ":" .. r.current .. ":" .. r.max .. ":" .. hex .. hid
         else
-            t[#t+1] = "R:" .. San(r.rtype) .. ":" .. r.current .. ":" .. r.max
+            t[#t+1] = "R:" .. San(r.rtype) .. ":" .. r.current .. ":" .. r.max .. hid
         end
     end
     for _, a in ipairs(db.attacks) do
@@ -234,22 +244,25 @@ local function Deserialize(data)
         elseif tag == "A" then
             local ac, at = rest:match("(%d+):(.*)")
             if ac then s.ac = tonumber(ac); s.armType = Clean(at) end
+        elseif tag == "T" then
+            local h, a = rest:match("(%d):(%d)")
+            if h then s.tipHP, s.tipAC = (h == "1"), (a == "1") end
         elseif tag == "R" then
-            local nm, c, m = rest:match("([^:]+):(%d+):(%d+)")
+            local nm, c, m, hid = rest:match("([^:]+):(%d+):(%d+):?(%d?)")
             if nm then
                 nm = Clean(nm)
                 local col = RES_COL[nm] or {0.75, 0.75, 0.75}
-                table.insert(s.resources, { name=nm, current=tonumber(c), max=tonumber(m), color=col })
+                table.insert(s.resources, { name=nm, current=tonumber(c), max=tonumber(m), color=col, hideTip = (hid == "1") })
             end
         elseif tag == "X" then
-            local nm, c, m, hex = rest:match("([^:]+):(%d+):(%d+):(%x%x%x%x%x%x)")
+            local nm, c, m, hex, hid = rest:match("([^:]+):(%d+):(%d+):(%x%x%x%x%x%x):?(%d?)")
             if nm then
                 local col = {
                     tonumber(hex:sub(1,2), 16) / 255,
                     tonumber(hex:sub(3,4), 16) / 255,
                     tonumber(hex:sub(5,6), 16) / 255,
                 }
-                table.insert(s.resources, { name=Clean(nm), current=tonumber(c), max=tonumber(m), color=col })
+                table.insert(s.resources, { name=Clean(nm), current=tonumber(c), max=tonumber(m), color=col, hideTip = (hid == "1") })
             end
         elseif tag == "K" then
             local nm, b, sd = rest:match("([^:]+):(-?%d+):?(%d*)")
@@ -2304,6 +2317,20 @@ local function BuildMain()
                     function() return (RollSheetDB.barScale or 1.0) == val end,
                     function() RollSheetDB.barScale = val; ApplyBarScale() end)
             end
+            local tipMenu = root:CreateButton("My tooltip shows")
+            tipMenu:CreateCheckbox("Health",
+                function() return RollSheetDB.tooltip.hp ~= false end,
+                function() RollSheetDB.tooltip.hp = not (RollSheetDB.tooltip.hp ~= false); ScheduleBroadcast() end)
+            tipMenu:CreateCheckbox("Armour & AC",
+                function() return RollSheetDB.tooltip.ac ~= false end,
+                function() RollSheetDB.tooltip.ac = not (RollSheetDB.tooltip.ac ~= false); ScheduleBroadcast() end)
+            for _, r in ipairs(RollSheetDB.resources) do
+                local res = r
+                local label = (res.rtype == "Custom" and res.custom ~= "" and res.custom) or res.rtype
+                tipMenu:CreateCheckbox(label,
+                    function() return not res.hideTip end,
+                    function() res.hideTip = not res.hideTip or nil; ScheduleBroadcast() end)
+            end
             root:CreateCheckbox("Minimap button",
                 function() return not RollSheetDB.minimap.hide end,
                 function() SlashCmdList["ROLLSHEET"]("minimap") end)
@@ -2602,9 +2629,13 @@ loader:SetScript("OnEvent", function(self, event, addon)
                     current = r.current,
                     max     = r.max,
                     color   = r.color,
+                    hideTip = r.hideTip,
                 })
             end
+            local tt = db.tooltip or {}
             return {
+                tipHP     = tt.hp ~= false,
+                tipAC     = tt.ac ~= false,
                 hp        = db.hp,
                 ac        = db.armour.ac,
                 armType   = ARM_ORDER[db.armour.typeIdx] or "Light",
@@ -2618,6 +2649,16 @@ loader:SetScript("OnEvent", function(self, event, addon)
         local function InjectRS(tip, data)
             if not tip or not tip.AddLine then return end
             if tip.__rsInjected then return end
+
+            -- Show only what this character chose to show.  Data from
+            -- clients older than 1.8.1 has no choices: show everything.
+            local showHP = data.tipHP ~= false
+            local showAC = data.tipAC ~= false
+            local shownRes = {}
+            for _, res in ipairs(data.resources) do
+                if not res.hideTip then shownRes[#shownRes + 1] = res end
+            end
+            if not showHP and not showAC and #shownRes == 0 then return end
             tip.__rsInjected = true
 
             tip:AddLine(" ")
@@ -2632,17 +2673,21 @@ loader:SetScript("OnEvent", function(self, event, addon)
                 end
             end)
 
-            local hpPct = data.hp.max > 0
-                and math.floor(data.hp.current / data.hp.max * 100) or 0
-            tip:AddDoubleLine(
-                "HP",
-                data.hp.current .. " / " .. data.hp.max .. "  (" .. hpPct .. "%)",
-                1, 1, 1,  0.9, 0.7, 0.3)
-            tip:AddDoubleLine(
-                "AC",
-                data.ac .. "  \194\183  " .. (data.armType or ""),
-                1, 1, 1,  0.9, 0.7, 0.3)
-            for _, res in ipairs(data.resources) do
+            if showHP then
+                local hpPct = data.hp.max > 0
+                    and math.floor(data.hp.current / data.hp.max * 100) or 0
+                tip:AddDoubleLine(
+                    "HP",
+                    data.hp.current .. " / " .. data.hp.max .. "  (" .. hpPct .. "%)",
+                    1, 1, 1,  0.9, 0.7, 0.3)
+            end
+            if showAC then
+                tip:AddDoubleLine(
+                    "AC",
+                    data.ac .. "  \194\183  " .. (data.armType or ""),
+                    1, 1, 1,  0.9, 0.7, 0.3)
+            end
+            for _, res in ipairs(shownRes) do
                 local pct = res.max > 0
                     and math.floor(res.current / res.max * 100) or 0
                 tip:AddDoubleLine(
