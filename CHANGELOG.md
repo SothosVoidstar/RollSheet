@@ -1,5 +1,16 @@
 # RollSheet Changelog
 
+## v1.8.2
+
+- **New Classic bar style, made entirely from Blizzard's own game art.** Gold-framed slots, the gold dialog border, golden dragon ornaments on both ends, and the game's own dice icons. Suits both factions. This is now the default style.
+- The previous artwork remains available as the *Gilded* style. Switch under *Bar style* in the gear menu (requires a quick reload).
+- `/rs art` shows which game art your client loaded for the Classic style.
+- **Limited uses for rolls (optional).** Give any roll in the sheet a number of uses, such as Throwing Knives with 5 uses. Each roll spends one, and at 0 the roll is blocked until you refill it. Leave the new *Uses* box empty to keep a roll unlimited.
+- The roll line in chat shows what's left, e.g. *Throwing Knives: 15 + 3 = 18 (d20) · 4/5 uses left*. Other RollSheet users see it too.
+- Pinned bar slots show the count in the corner, and the icon greys out when it runs out.
+- Refill a roll by clicking its count in the sheet or right-clicking its bar slot, or use *Refill all uses* in the gear menu.
+- Uses are saved per character and also show in your sheet when others view it.
+
 ## v1.8.1
 
 - **Choose what your tooltip shows.** In the gear menu, *My tooltip shows* lets each character pick which fields appear when other players hover them: Health, Armour & AC, and each resource individually. Hide everything and the RollSheet section disappears from your tooltip entirely. Your full sheet is still available through `/rs view`.

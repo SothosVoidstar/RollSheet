@@ -2,7 +2,7 @@
 ## Title: RollSheet
 ## Notes: RP dice roller and character sheet — WoW: Midnight
 ## Author: SothosVoidstar
-## Version: 1.8.1
+## Version: 1.8.2
 ## SavedVariablesPerCharacter: RollSheetDB
 ## X-Credits: Icon names from the wowdev community listfile (github.com/wowdev/wow-listfile)
 ## OptionalDeps: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0

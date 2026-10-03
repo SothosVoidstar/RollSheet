@@ -1,4 +1,4 @@
--- RollSheet.lua  v1.8.1
+-- RollSheet.lua  v1.8.2
 -- RP dice roller + character sheet  ·  World of Warcraft: Midnight
 -- /rs  or  /rollsheet
 --
@@ -19,7 +19,7 @@ local addonName, ns = ...
 --  Constants
 -- ================================================================
 
-local ADDON_VERSION = "1.8.1"
+local ADDON_VERSION = "1.8.2"
 local ADDON_PREFIX = "RSHEET2"   -- new prefix: v1.4 is not wire-compatible with 1.3.x
 
 local RES_TYPES = {
@@ -115,6 +115,7 @@ local function InitDB()
         }
     end
     -- 1.8.1: which fields this character shows in their tooltip
+    if db.barStyle ~= "gilded" and db.barStyle ~= "classic" then db.barStyle = "classic" end
     if type(db.tooltip) ~= "table" then db.tooltip = {} end
     if db.tooltip.hp == nil then db.tooltip.hp = true end
     if db.tooltip.ac == nil then db.tooltip.ac = true end
@@ -229,6 +230,7 @@ local function Serialize()
     end
     for _, a in ipairs(db.attacks) do
         t[#t+1] = "K:" .. San(a.name) .. ":" .. a.bonus .. ":" .. (a.sides or 20)
+            .. (a.maxUses and (":" .. (a.uses or a.maxUses) .. ":" .. a.maxUses) or "")
     end
     return table.concat(t, ";")
 end
@@ -265,9 +267,10 @@ local function Deserialize(data)
                 table.insert(s.resources, { name=Clean(nm), current=tonumber(c), max=tonumber(m), color=col, hideTip = (hid == "1") })
             end
         elseif tag == "K" then
-            local nm, b, sd = rest:match("([^:]+):(-?%d+):?(%d*)")
+            local nm, b, sd, u, m = rest:match("([^:]+):(-?%d+):?(%d*):?(%d*):?(%d*)")
             if nm then
-                table.insert(s.attacks, { name=Clean(nm), bonus=tonumber(b), sides=tonumber(sd) or 20 })
+                table.insert(s.attacks, { name=Clean(nm), bonus=tonumber(b), sides=tonumber(sd) or 20,
+                                          uses=tonumber(u), maxUses=tonumber(m) })
             end
         end
     end
@@ -307,6 +310,14 @@ local function LogRoll(key, sides, mod, label)
     table.insert(list, 1, { lo=lo, hi=hi, sides=sides, mod=mod, label=label, t=GetTime() })
     while #list > 5 do table.remove(list) end
     rollLog[key] = list
+end
+
+-- Attach a use count to the newest roll from this player.
+local function SetRollUses(key, uses, max)
+    local list = rollLog[key]
+    if list and list[1] and GetTime() - list[1].t < 5 then
+        list[1].uses, list[1].max = uses, max
+    end
 end
 
 local function FindRoll(key, lo, hi)
@@ -520,7 +531,8 @@ local function ShowRemoteSheet(playerName, sheet)
         Section(viewFrame, "Attacks", y); y = y - 20
         for _, atk in ipairs(sheet.attacks) do
             local sign = atk.bonus >= 0 and "+" or ""
-            Lbl(viewFrame, "d" .. (atk.sides or 20) .. sign .. atk.bonus .. "   " .. atk.name,
+            Lbl(viewFrame, "d" .. (atk.sides or 20) .. sign .. atk.bonus .. "   " .. atk.name
+                .. (atk.maxUses and ("   (" .. (atk.uses or atk.maxUses) .. "/" .. atk.maxUses .. ")") or ""),
                 nil, 0.12, 0.08, 0.04)
                 :SetPoint("TOPLEFT", viewFrame, "TOPLEFT", 12, y)
             y = y - 18
@@ -764,6 +776,12 @@ local function OnAddonMessage(prefix, text, channel, sender)
             LogRoll(key, sd, md, lbl ~= "" and Clean(lbl) or nil)
         end
 
+    elseif kind == "U" then
+        -- Uses left for the roll just announced: "U^uses^max"
+        local u, m = text:match("^U%^(%d+)%^(%d+)$")
+        u, m = tonumber(u), tonumber(m)
+        if u and m and m >= 1 and m <= 99 and u <= m then SetRollUses(key, u, m) end
+
     elseif kind == "Q" then
         -- Request: "Q^V" (from /rs view) or "Q^H" (tooltip hover)
         local mode = text:sub(3, 3)
@@ -888,39 +906,49 @@ end
 
 -- Announce to everyone who could see the roll and has RollSheet:
 -- the group, plus anyone outside it who looked at our sheet recently.
-local function AnnounceRoll(sides, mod, label)
-    local text = "R^" .. sides .. "^" .. mod .. "^" .. San(label or ""):sub(1, 40)
+-- A roll with limited uses also sends "U^uses^max" right after it;
+-- versions before 1.8.2 ignore that message.
+local function AnnounceRoll(sides, mod, label, uses, max)
+    local texts = { "R^" .. sides .. "^" .. mod .. "^" .. San(label or ""):sub(1, 40) }
+    if max then texts[2] = "U^" .. uses .. "^" .. max end
     local ch = GetGroupChannel()
-    if ch then Enqueue(text, ch) end
     local now, sent = GetTime(), 0
+    for _, text in ipairs(texts) do
+        if ch then Enqueue(text, ch) end
+    end
     for _, w in pairs(watchers) do
         if w.exp > now and sent < MAX_WATCHERS and not InMyGroup(w.full) then
-            Enqueue(text, "WHISPER", w.full)
+            for _, text in ipairs(texts) do Enqueue(text, "WHISPER", w.full) end
             sent = sent + 1
         end
     end
 end
 
--- The one function every roll button goes through.
-local function RollDie(sides, mod, label)
+-- The one function every roll button goes through.  Returns true if
+-- the roll went out.  uses/max are passed for rolls with limited uses.
+local function RollDie(sides, mod, label, uses, max)
     sides = math.floor(tonumber(sides) or 20)
     mod   = math.floor(tonumber(mod) or 0)
     if sides < 2 or sides > MAX_SIDES then
         print("|cffaa8844RollSheet|r Dice need between 2 and " .. MAX_SIDES .. " sides.")
-        return
+        return false
     end
     if mod < -MAX_MOD or mod > MAX_MOD then
         print("|cffaa8844RollSheet|r Modifiers must be between -" .. MAX_MOD .. " and +" .. MAX_MOD .. ".")
-        return
+        return false
     end
     if label == "" then label = nil end
 
     local _, me = Me()
-    if me then LogRoll(me, sides, mod, label) end
-    AnnounceRoll(sides, mod, label)
+    if me then
+        LogRoll(me, sides, mod, label)
+        if max then SetRollUses(me, uses, max) end
+    end
+    AnnounceRoll(sides, mod, label, uses, max)
 
     local lo, hi = RangeFor(sides, mod)
     RandomRoll(lo, hi)
+    return true
 end
 
 -- ── Reading roll lines ───────────────────────────────────────────
@@ -983,6 +1011,10 @@ local function DecodeRollLine(msg)
     local out
     if label then
         out = who .. DOT .. Clean(label) .. ": " .. body .. "  (d" .. sides .. ")"
+        if rec and rec.max then
+            local col = (rec.uses == 0) and "|cffff6040" or "|cffe6c27a"
+            out = out .. DOT .. col .. rec.uses .. "/" .. rec.max .. " uses left|r"
+        end
     else
         out = who .. DOT .. die .. ": " .. body        -- no words, so no language issues
     end
@@ -1043,7 +1075,8 @@ end
 -- To use new artwork with the same layout, replace the TGA.  If the
 -- layout changes, re-measure these rectangles.
 
-local ART = {
+local GILDED = {
+    style    = "gilded",
     file     = "Interface\\AddOns\\RollSheet\\Media\\ButtonBar",
     master   = { 2048, 512 },
     scale    = 0.25,                      -- master px → UI units (bar art = 512 x 128)
@@ -1078,7 +1111,54 @@ local ART = {
     highlight = "Interface/Buttons/ButtonHilight-Square",
 }
 
-local FW = (ART.sheetRight - ART.sheetLeft) * ART.scale   -- sheet width
+-- ── Classic style: Blizzard's own assets only ─────────────────────
+-- Same coordinate convention as the artwork (4 units per UI pixel,
+-- body at 0,0) so all the placement code works unchanged.
+--   UI layout:  [RS][d20][d100][Custom][Pin 1][Pin 2][gear/chevron]
+local CLASSIC = {
+    style    = "classic",
+    scale    = 0.25,
+    body     = { 0, 0, 1612, 324 },               -- 403 x 81
+    -- Each slot is a gold achievement frame (55 x 55) with the icon
+    -- inside it (38 x 38), the way Blizzard frames achievement icons.
+    tile     = {
+        d20    = {  292, 52, 220, 220 },
+        d100   = {  524, 52, 220, 220 },
+        custom = {  756, 52, 220, 220 },
+        pin1   = {  988, 52, 220, 220 },
+        pin2   = { 1220, 52, 220, 220 },
+    },
+    gear     = { 1464,  68,  96,  88 },
+    chevron  = { 1464, 176,  96,  88 },
+    logo     = {   52,  52, 220, 220 },
+    pinInner = {                                   -- icon area inside each frame
+        d20    = {  326, 86, 152, 152 },
+        d100   = {  558, 86, 152, 152 },
+        custom = {  790, 86, 152, 152 },
+        pin1   = { 1022, 86, 152, 152 },
+        pin2   = { 1254, 86, 152, 152 },
+    },
+    iconInset = 8.5,                               -- UI px from frame edge to icon
+    textInset = 0.19,                              -- corner numbers sit on the icon
+    fixedIcon = {
+        d20    = "Interface\\Icons\\INV_Misc_Dice_02",
+        d100   = "Interface\\Icons\\INV_Misc_Dice_01",
+        custom = "Interface\\Icons\\Ability_Rogue_RollTheBones",
+    },
+    sheetLeft  = 0,
+    sheetRight = 1612,
+    sheetTop   = 316,                              -- tucked under the bottom border
+    pinIcon  = GILDED.pinIcon,
+    highlight = "Interface/Buttons/ButtonHilight-Square",
+}
+
+local ART = CLASSIC                               -- chosen from settings at load
+local FW  = (ART.sheetRight - ART.sheetLeft) * ART.scale   -- sheet width
+
+local function ChooseBarStyle()
+    ART = (RollSheetDB.barStyle == "gilded") and GILDED or CLASSIC
+    FW  = (ART.sheetRight - ART.sheetLeft) * ART.scale
+end
 
 -- Size and position a frame over a master-artwork rectangle.
 local function PlaceOnArt(frame, parent, r)
@@ -1124,6 +1204,53 @@ local function ParseRollSpec(text)
 end
 
 local RefreshBar = function() end   -- replaced in BuildMain
+
+-- ── Limited uses ──────────────────────────────────────────────────
+-- A roll with maxUses set (e.g. Throwing Knives, 5 uses) spends one
+-- use per roll and refuses to roll at 0 until refilled.  Rolls
+-- without maxUses are unlimited, as before.
+local usesLabels = {}   -- [roll id] = count label in the open sheet
+
+local function UsesText(a)
+    if not a.maxUses then return "" end
+    return (a.uses or a.maxUses) .. "/" .. a.maxUses
+end
+
+local function RefreshUsesLabels()
+    for id, fs in pairs(usesLabels) do
+        local a = GetRollById(id)
+        if a and fs.SetText then
+            fs:SetText(a.maxUses and ((a.uses or a.maxUses) .. "/") or "")
+            if a.maxUses and (a.uses or a.maxUses) == 0 then fs:SetTextColor(0.8, 0.15, 0.1)
+            else fs:SetTextColor(0.28, 0.15, 0.04) end
+        end
+    end
+end
+
+local function UseRoll(a)
+    if not a then return end
+    if not a.maxUses then
+        RollDie(a.sides or 20, a.bonus, a.name)
+        return
+    end
+    local left = a.uses or a.maxUses
+    if left <= 0 then
+        print("|cffaa8844RollSheet|r " .. a.name .. " has no uses left. Refill it in the sheet or by right-clicking its bar slot.")
+        return
+    end
+    if RollDie(a.sides or 20, a.bonus, a.name, left - 1, a.maxUses) then
+        a.uses = left - 1
+        if RollSheetDB.rollStyle == "off" then      -- no rewritten roll line to carry the count
+            print("|cffaa8844RollSheet|r " .. a.name .. ": " .. a.uses .. "/" .. a.maxUses .. " uses left.")
+        end
+        RefreshBar(); RefreshUsesLabels(); ScheduleBroadcast()
+    end
+end
+
+local function RefillRoll(a)
+    if a and a.maxUses then a.uses = a.maxUses end
+    RefreshBar(); RefreshUsesLabels(); ScheduleBroadcast()
+end
 
 -- ================================================================
 --  BuildSheet
@@ -1386,8 +1513,12 @@ local function BuildSheet()
 
     -- Fixed columns.  InputBoxTemplate draws its border ~6px outside
     -- the frame on each side, so boxes need a 12px+ gap between them.
-    local COL_PIN, COL_D, COL_SIDES, COL_MOD, COL_NAME = 10, 42, 58, 104, 150
-    local hdr = { {"Pin", COL_PIN + 2}, {"Die", COL_SIDES - 2}, {"Mod", COL_MOD - 2}, {"Name", COL_NAME - 2} }
+    -- Planned for the narrowest sheet (Gilded, 356 px) with a visible
+    -- gap of 2-6 px between every pair of boxes.
+    local COL_PIN, COL_SIDES, COL_MOD, COL_USES, COL_MAX, COL_NAME = 8, 42, 84, 118, 146, 182
+    local hdr = { {"Pin", COL_PIN + 1}, {"Die", COL_SIDES - 2}, {"Mod", COL_MOD - 2},
+                  {"Uses", COL_USES + 8}, {"Name", COL_NAME - 2} }
+    wipe(usesLabels)
     for _, h in ipairs(hdr) do
         Lbl(sheetFrame, h[1], "GameFontDisableSmall", 0.28, 0.15, 0.04)
             :SetPoint("TOPLEFT", sheetFrame, "TOPLEFT", h[2], y)
@@ -1404,7 +1535,7 @@ local function BuildSheet()
         local idx = i
 
         -- Pin toggle
-        local pinBtn = Btn(sheetFrame, 24, 22, PinLabel(atk.id))
+        local pinBtn = Btn(sheetFrame, 22, 22, PinLabel(atk.id))
         pinBtn:SetPoint("TOPLEFT", sheetFrame, "TOPLEFT", COL_PIN, y)
         pinBtn:SetScript("OnClick", function(self)
             if not db.attacks[idx] then return end
@@ -1423,10 +1554,8 @@ local function BuildSheet()
         end)
         pinBtn:SetScript("OnLeave", GameTooltip_Hide)
 
-        -- Die size
-        local dLbl = Lbl(sheetFrame, "d", "GameFontNormal", 0.28, 0.15, 0.04)
-        dLbl:SetPoint("TOPLEFT", sheetFrame, "TOPLEFT", COL_D, y - 4)
-        local sideEB = EB(sheetFrame, "RSRollSides" .. i, 34, 22, 4)
+        -- Die size (the "Die" heading names the column)
+        local sideEB = EB(sheetFrame, "RSRollSides" .. i, 26, 22, 4)
         sideEB:SetPoint("TOPLEFT", sheetFrame, "TOPLEFT", COL_SIDES, y)
         sideEB:SetNumeric(true)
         sideEB:SetText(tostring(atk.sides or 20))
@@ -1439,7 +1568,7 @@ local function BuildSheet()
         end)
 
         -- Modifier
-        local bonusEB = EB(sheetFrame, "RSAtkBonus" .. i, 34, 22, 4)
+        local bonusEB = EB(sheetFrame, "RSAtkBonus" .. i, 26, 22, 4)
         bonusEB:SetPoint("TOPLEFT", sheetFrame, "TOPLEFT", COL_MOD, y)
         bonusEB:SetText(tostring(atk.bonus))
         bonusEB:SetScript("OnEditFocusLost", function(s)
@@ -1449,6 +1578,54 @@ local function BuildSheet()
                 db.attacks[idx].bonus = v; RefreshBar(); ScheduleBroadcast()
             else s:SetText(tostring(db.attacks[idx].bonus)) end
         end)
+
+        -- Uses: "4/" (click to refill) and the maximum.  Empty = unlimited.
+        local countBtn = CreateFrame("Button", nil, sheetFrame)
+        countBtn:SetSize(20, 22)
+        countBtn:SetPoint("TOPLEFT", sheetFrame, "TOPLEFT", COL_USES, y)
+        local countFS = countBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        countFS:SetPoint("RIGHT", 0, 0)
+        countFS:SetJustifyH("RIGHT")
+        usesLabels[atk.id] = countFS
+        countBtn:SetScript("OnClick", function()
+            local a = db.attacks[idx]
+            if a and a.maxUses then RefillRoll(a) end
+        end)
+        countBtn:SetScript("OnEnter", function(self)
+            local a = db.attacks[idx]
+            if not a or not a.maxUses then return end
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
+            GameTooltip:AddLine(a.name .. ": " .. UsesText(a) .. " uses left")
+            GameTooltip:AddLine("Click to refill.", 1, 1, 1)
+            GameTooltip:Show()
+        end)
+        countBtn:SetScript("OnLeave", GameTooltip_Hide)
+
+        local maxEB = EB(sheetFrame, "RSRollMax" .. i, 20, 22, 2)
+        maxEB:SetPoint("TOPLEFT", sheetFrame, "TOPLEFT", COL_MAX, y)
+        maxEB:SetNumeric(true)
+        maxEB:SetText(atk.maxUses and tostring(atk.maxUses) or "")
+        maxEB:SetScript("OnEditFocusLost", function(s)
+            local a = db.attacks[idx]
+            if not a then return end
+            local v = tonumber(s:GetText())
+            if v and v >= 1 and v <= 99 then
+                a.uses = math.min(a.uses or v, v)
+                if not a.maxUses then a.uses = v end      -- newly limited: start full
+                a.maxUses = v
+            else
+                a.maxUses, a.uses = nil, nil              -- empty or 0: unlimited
+                s:SetText("")
+            end
+            RefreshBar(); RefreshUsesLabels(); ScheduleBroadcast()
+        end)
+        maxEB:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
+            GameTooltip:AddLine("Uses")
+            GameTooltip:AddLine("How many times this can be rolled before it needs refilling. Leave empty for unlimited.", 1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        maxEB:SetScript("OnLeave", GameTooltip_Hide)
 
         -- Remove
         local xBtn = Btn(sheetFrame, 18, 18, "X")
@@ -1463,20 +1640,20 @@ local function BuildSheet()
         end)
 
         -- Roll
-        local arBtn = Btn(sheetFrame, 46, 22, "Roll")
+        local arBtn = Btn(sheetFrame, 36, 22, "Roll")
         arBtn:SetPoint("RIGHT", xBtn, "LEFT", -4, 0)
         arBtn:SetScript("OnClick", function()
             local a = db.attacks[idx]
             if not a then return end
             a.bonus = tonumber(bonusEB:GetText()) or a.bonus
             a.sides = tonumber(sideEB:GetText()) or a.sides
-            RollDie(a.sides or 20, a.bonus, a.name)
+            UseRoll(a)
         end)
 
         -- Name (fills the space between modifier and Roll)
         local anEB = EB(sheetFrame, "RSAtkName" .. i, 10, 22, 40)
         anEB:SetPoint("TOPLEFT", sheetFrame, "TOPLEFT", COL_NAME, y)
-        anEB:SetPoint("RIGHT", arBtn, "LEFT", -10, 0)
+        anEB:SetPoint("RIGHT", arBtn, "LEFT", -8, 0)
         anEB:SetText(atk.name)
         anEB:SetScript("OnEditFocusLost", function(s)
             if not db.attacks[idx] then return end
@@ -1486,6 +1663,8 @@ local function BuildSheet()
 
         y = y - 26
     end
+
+    RefreshUsesLabels()
 
     if #db.attacks < 12 then
         local addBtn = Btn(sheetFrame, 90, 22, "+ Add Roll")
@@ -1544,10 +1723,14 @@ local function RollSlot(parent, key)
     b.icon:Hide()
 
     b.die = b:CreateFontString(nil, "OVERLAY", "NumberFontNormal")      -- bottom-left: "d6"
-    b.die:SetPoint("BOTTOMLEFT", w * 0.12, h * 0.12)
+    local ti = ART.textInset or 0.12
+    b.die:SetPoint("BOTTOMLEFT", w * ti, h * ti)
 
     b.mod = b:CreateFontString(nil, "OVERLAY", "NumberFontNormal")      -- top-right: "+3"
-    b.mod:SetPoint("TOPRIGHT", -w * 0.12, -h * 0.12)
+    b.mod:SetPoint("TOPRIGHT", -w * ti, -h * ti)
+
+    b.uses = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall") -- top-left: "4/5"
+    b.uses:SetPoint("TOPLEFT", w * ti, -h * ti)
 
     b.empty = b:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")  -- empty pin slot
     b.empty:SetPoint("CENTER")
@@ -1639,6 +1822,131 @@ StaticPopupDialogs["ROLLSHEET_CUSTOM_DIE"] = {
 }
 
 local slots = {}
+local DecorateClassic
+
+-- ── Classic style decoration ───────────────────────────────────────
+-- Newer Blizzard art lives in texture atlases whose names can change
+-- between patches, so every one is checked first and has a fallback
+-- that's known to work.  /rs art lists what this client found.
+local artReport = {}
+
+local function AtlasOK(name)
+    local ok, info = pcall(C_Texture.GetAtlasInfo, name)
+    return ok and info ~= nil and info or nil
+end
+local function FileOK(path)
+    if not GetFileIDFromPath then return true end
+    local ok, id = pcall(GetFileIDFromPath, path)
+    return ok and id ~= nil
+end
+
+DecorateClassic = function(art, logo, gear, chev)
+    wipe(artReport)
+    local inset = ART.iconInset
+
+    -- Panel: dark dialog background with Blizzard's gold dialog border
+    local gold = "Interface\\DialogFrame\\UI-DialogBox-Gold-Border"
+    local hasGold = FileOK(gold)
+    mainFrame:SetBackdrop({
+        bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+        edgeFile = hasGold and gold or "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 32, edgeSize = hasGold and 24 or 16,
+        insets   = { left = 6, right = 6, top = 6, bottom = 6 },
+    })
+    if not hasGold then mainFrame:SetBackdropBorderColor(0.80, 0.62, 0.25, 1) end
+    artReport[#artReport + 1] = "Border: " .. (hasGold and "gold dialog border" or "tooltip border (fallback)")
+
+    -- Gold achievement frames around every slot and the monogram
+    local achFrame = "Interface\\AchievementFrame\\UI-Achievement-IconFrame"
+    local hasAch = FileOK(achFrame)
+    local frameAtlas = (not hasAch) and AtlasOK("UI-HUD-ActionBar-IconFrame") and "UI-HUD-ActionBar-IconFrame"
+    artReport[#artReport + 1] = "Slot frames: " .. (hasAch and "gold achievement frames"
+        or frameAtlas or "classic quickslot (fallback)")
+
+    local function Frame(btn)
+        -- dark backing behind the icon
+        local bg = btn:CreateTexture(nil, "BACKGROUND")
+        bg:SetPoint("TOPLEFT", inset, -inset); bg:SetPoint("BOTTOMRIGHT", -inset, inset)
+        bg:SetColorTexture(0, 0, 0, 0.8)
+        -- the frame itself, drawn over the icon's edges
+        local f = btn:CreateTexture(nil, "OVERLAY", nil, -1)
+        f:SetAllPoints()
+        if hasAch then
+            f:SetTexture(achFrame); f:SetTexCoord(0, 0.5625, 0, 0.5625)
+        elseif frameAtlas then
+            f:SetAtlas(frameAtlas)
+        else
+            f:SetTexture("Interface\\Buttons\\UI-Quickslot2"); f:SetTexCoord(0.2, 0.8, 0.2, 0.8)
+        end
+        -- hover glow and pressed shade only over the icon
+        local hl = btn:GetHighlightTexture()
+        if hl then
+            hl:ClearAllPoints()
+            hl:SetPoint("TOPLEFT", inset, -inset); hl:SetPoint("BOTTOMRIGHT", -inset, inset)
+            hl:SetVertexColor(1.0, 0.85, 0.45, 0.6)
+        end
+        if type(btn.press) == "table" then
+            btn.press:ClearAllPoints()
+            btn.press:SetPoint("TOPLEFT", inset, -inset); btn.press:SetPoint("BOTTOMRIGHT", -inset, inset)
+        end
+    end
+    for _, key in ipairs({ "d20", "d100", "custom", "pin1", "pin2" }) do
+        Frame(slots[key])
+        if ART.fixedIcon[key] then
+            slots[key].icon:SetTexture(ART.fixedIcon[key]); slots[key].icon:Show()
+        end
+    end
+    Frame(logo)
+
+    -- "RS" in WoW's Morpheus lettering
+    local rs = logo:CreateFontString(nil, "OVERLAY")
+    if not pcall(rs.SetFont, rs, "Fonts\\MORPHEUS.TTF", 24, "OUTLINE") or not rs:GetFont() then
+        rs:SetFontObject(GameFontNormalLarge)
+    end
+    rs:SetPoint("CENTER", 0, 1)
+    rs:SetText("RS")
+    rs:SetTextColor(1.0, 0.82, 0.35)
+
+    -- Gear
+    gear.tex = gear:CreateTexture(nil, "ARTWORK")
+    gear.tex:SetPoint("TOPLEFT", 1, -1); gear.tex:SetPoint("BOTTOMRIGHT", -1, 1)
+    gear.tex:SetTexture("Interface\\Buttons\\UI-OptionsButton")
+
+    -- Gold dragons curling around both ends (mirrored on the right)
+    local dragon = "Interface\\DialogFrame\\UI-DialogBox-Gold-Dragon"
+    if FileOK(dragon) then
+        local size = 100
+        local left = art:CreateTexture(nil, "ARTWORK")
+        left:SetTexture(dragon)
+        left:SetSize(size, size)
+        left:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", -27, 12)    -- spine rests on the border
+        local right = art:CreateTexture(nil, "ARTWORK")
+        right:SetTexture(dragon)
+        right:SetTexCoord(1, 0, 0, 1)
+        right:SetSize(size, size)
+        right:SetPoint("TOPRIGHT", mainFrame, "TOPRIGHT", 27, 12)
+        artReport[#artReport + 1] = "Ornaments: gold dragons"
+    else
+        -- fall back to the action bar's own end caps
+        local beast = (UnitFactionGroup("player") == "Horde") and "Wyvern" or "Gryphon"
+        local L, R = "UI-HUD-ActionBar-" .. beast .. "-Left", "UI-HUD-ActionBar-" .. beast .. "-Right"
+        local infoL, infoR = AtlasOK(L), AtlasOK(R)
+        if infoL and infoR then
+            local h = 96
+            local function Cap(name, info, point, relPoint, x)
+                local t = art:CreateTexture(nil, "ARTWORK")
+                t:SetAtlas(name)
+                t:SetSize(h * info.width / info.height, h)
+                t:SetPoint(point, mainFrame, relPoint, x, -10)
+            end
+            Cap(L, infoL, "BOTTOMRIGHT", "BOTTOMLEFT", 26)
+            Cap(R, infoR, "BOTTOMLEFT", "BOTTOMRIGHT", -26)
+            artReport[#artReport + 1] = "Ornaments: " .. beast:lower() .. " end caps (gold dragon not found)"
+        else
+            artReport[#artReport + 1] = "Ornaments: none found on this client"
+        end
+    end
+end
 
 -- ── Pin icons ─────────────────────────────────────────────────────
 -- Icons belong to the roll, so they follow it to whichever slot it's
@@ -2082,6 +2390,14 @@ local function OpenIconPicker(rollId)
     if #picker.list == 0 then PickerSetTab("all") end
 end
 
+StaticPopupDialogs["ROLLSHEET_RELOAD"] = {
+    text = "The new bar style is used after reloading the interface.",
+    button1 = "Reload now",
+    button2 = "Later",
+    OnAccept = function() ReloadUI() end,
+    timeout = 0, whileDead = true, hideOnEscape = true,
+}
+
 StaticPopupDialogs["ROLLSHEET_ICON"] = {
     text = "Type an icon name or ID\n|cffaaaaaae.g. inv_sword_04 (Wowhead shows these names)|r",
     button1 = ACCEPT or "Accept",
@@ -2152,10 +2468,12 @@ local function BuildMain()
     art:SetAllPoints()
     art:SetFrameLevel(mainFrame:GetFrameLevel() + 10)
     local k = ART.scale
-    local barTex = art:CreateTexture(nil, "BACKGROUND")
-    barTex:SetTexture(ART.file)
-    barTex:SetSize(ART.master[1] * k, ART.master[2] * k)
-    barTex:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", -ART.body[1] * k, ART.body[2] * k)
+    if ART.style == "gilded" then
+        local barTex = art:CreateTexture(nil, "BACKGROUND")
+        barTex:SetTexture(ART.file)
+        barTex:SetSize(ART.master[1] * k, ART.master[2] * k)
+        barTex:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", -ART.body[1] * k, ART.body[2] * k)
+    end
 
     -- Five roll slots over the painted tiles
     for _, key in ipairs({ "d20", "d100", "custom", "pin1", "pin2" }) do
@@ -2217,7 +2535,7 @@ local function BuildMain()
             if GetCursorInfo() then DropIconOnSlot(n); return end   -- placing something held
             local roll = GetRollById(RollSheetDB.pins[n])
             if button == "LeftButton" and roll then
-                RollDie(roll.sides or 20, roll.bonus, roll.name)
+                UseRoll(roll)
                 return
             end
             -- Right-click (or left-click on an empty slot): choose a roll
@@ -2248,6 +2566,9 @@ local function BuildMain()
                         end)
                     end
                 end
+                if roll and roll.maxUses then
+                    root:CreateButton("Refill uses (" .. UsesText(roll) .. ")", function() RefillRoll(roll) end)
+                end
                 root:CreateButton("Empty this slot", function()
                     RollSheetDB.pins[n] = nil
                     RefreshBar()
@@ -2276,7 +2597,8 @@ local function BuildMain()
         slots["pin" .. n]:SetScript("OnEnter", function(self)
             local roll = GetRollById(RollSheetDB.pins[n])
             if roll then
-                SlotTooltip(self, roll.name, "d" .. (roll.sides or 20) .. ModText(roll.bonus),
+                SlotTooltip(self, roll.name, "d" .. (roll.sides or 20) .. ModText(roll.bonus)
+                    .. (roll.maxUses and ("   " .. UsesText(roll) .. " uses left") or ""),
                     "Right-click to change the roll or its icon. Drag a spell, item or macro here to use its icon.")
             else
                 SlotTooltip(self, "Empty slot", nil, "Click to pin one of your sheet's rolls here.")
@@ -2310,12 +2632,32 @@ local function BuildMain()
                         function() RollSheetDB.parchment = key; RefreshParchments() end)
                 end
             end
+            local styleMenu = root:CreateButton("Bar style")
+            for _, st in ipairs({ { "classic", "Classic (Blizzard art)" }, { "gilded", "Gilded" } }) do
+                local val = st[1]
+                styleMenu:CreateRadio(st[2],
+                    function() return (RollSheetDB.barStyle or "classic") == val end,
+                    function()
+                        if RollSheetDB.barStyle == val then return end
+                        RollSheetDB.barStyle = val
+                        StaticPopup_Show("ROLLSHEET_RELOAD")
+                    end)
+            end
             local size = root:CreateButton("Bar size")
             for _, sz in ipairs(BAR_SIZES) do
                 local val = sz[1]
                 size:CreateRadio(sz[2],
                     function() return (RollSheetDB.barScale or 1.0) == val end,
                     function() RollSheetDB.barScale = val; ApplyBarScale() end)
+            end
+            local anyLimited = false
+            for _, a in ipairs(RollSheetDB.attacks) do if a.maxUses then anyLimited = true end end
+            if anyLimited then
+                root:CreateButton("Refill all uses", function()
+                    for _, a in ipairs(RollSheetDB.attacks) do if a.maxUses then a.uses = a.maxUses end end
+                    RefreshBar(); RefreshUsesLabels(); ScheduleBroadcast()
+                    print("|cffaa8844RollSheet|r All uses refilled.")
+                end)
             end
             local tipMenu = root:CreateButton("My tooltip shows")
             tipMenu:CreateCheckbox("Health",
@@ -2350,7 +2692,7 @@ local function BuildMain()
     local chev = SmallButton(art, ART.chevron)
     chev.tex = chev:CreateTexture(nil, "ARTWORK")
     chev.tex:SetAllPoints()
-    chev.tex:SetTexture(ART.file)
+    if ART.style == "gilded" then chev.tex:SetTexture(ART.file) end
     chev:SetScript("OnClick", ToggleSheet)
     chev:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_TOP"); GameTooltip:AddLine("Character sheet"); GameTooltip:Show()
@@ -2370,18 +2712,28 @@ local function BuildMain()
                 b.icon:SetTexture(roll.icon or ART.pinIcon["pin" .. n])
                 b.icon:Show(); b.empty:Hide()
                 b.die:SetText("d" .. (roll.sides or 20))
+                b.uses:SetText(UsesText(roll))
+                local out = roll.maxUses and (roll.uses or roll.maxUses) == 0
+                b.uses:SetTextColor(out and 1 or 1, out and 0.3 or 1, out and 0.25 or 1)
+                b.icon:SetDesaturated(out and true or false)
                 b.mod:SetText(ModText(roll.bonus))
             else
                 b.icon:Hide(); b.empty:Show()
-                b.die:SetText(""); b.mod:SetText("")
+                b.die:SetText(""); b.mod:SetText(""); b.uses:SetText("")
             end
         end
 
         local open = sheetFrame and sheetFrame:IsShown()
-        local l, r, t, btm = ArtCoords(ART.chevron)
-        if open then chev.tex:SetTexCoord(l, r, btm, t)     -- flipped: points up
-        else chev.tex:SetTexCoord(l, r, t, btm) end
+        if ART.style == "gilded" then
+            local l, r, t, btm = ArtCoords(ART.chevron)
+            if open then chev.tex:SetTexCoord(l, r, btm, t)     -- flipped: points up
+            else chev.tex:SetTexCoord(l, r, t, btm) end
+        else
+            chev.tex:SetTexture(open and "Interface/ChatFrame/UI-ChatIcon-ScrollUp-Up"
+                                      or "Interface/ChatFrame/UI-ChatIcon-ScrollDown-Up")
+        end
     end
+    if ART.style == "classic" then DecorateClassic(art, logo, gear, chev) end
     RefreshBar()
 
     -- 1.6 stored the position in UI units at scale 1; convert once.
@@ -2439,6 +2791,9 @@ SlashCmdList["ROLLSHEET"] = function(msg)
         RequestSheet(arg)
     elseif cmd == "share" then
         ShareSheet()
+    elseif cmd == "art" then
+        print("|cffaa8844RollSheet|r Bar style: " .. (ART.style == "gilded" and "Gilded" or "Classic (Blizzard art)"))
+        for _, line in ipairs(artReport) do print("   " .. line) end
     elseif cmd == "debug" then
         debugComms = not debugComms
         print("|cffaa8844RollSheet|r Comms debug " .. (debugComms and "ON" or "OFF") .. ".")
@@ -2498,6 +2853,7 @@ loader:SetScript("OnEvent", function(self, event, addon)
 
     C_ChatInfo.RegisterAddonMessagePrefix(ADDON_PREFIX)
     InitDB()
+    ChooseBarStyle()
     pcall(InstallRollFilter)
 
     -- ── BUILD CORE FRAMES FIRST ──────────────────────────────────
